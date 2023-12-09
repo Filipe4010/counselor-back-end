@@ -1,15 +1,12 @@
 const express = require('express');
 const bodyParser = require('body-parser');
-const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
 const mysql = require('mysql2/promise');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware
-app.use(bodyParser.json());
-
-// MySQL Connection
+// Replace with your database connection details
 const pool = mysql.createPool({
     host: '127.0.0.1',
     user: 'root',
@@ -18,132 +15,228 @@ const pool = mysql.createPool({
     waitForConnections: true,
 });
 
-// API Routes
+app.use(bodyParser.json());
 
-// Create User
-app.post('/api/users', async (req, res) => {
-    try {
-        const { name, phone, email, cpf, username, password, address, companies } = req.body;
+// Middleware to verify JWT token
+const verifyToken = (req, res, next) => {
+  const token = req.headers['authorization'];
+  if (!token) return res.status(403).json({ auth: false, message: 'No token provided.' });
 
-        const saltRounds = 10;
-        const password_hash = await bcrypt.hash(password, saltRounds);
+  jwt.verify(token, 'zxSA8Df5dQ3WE15&&', (err, decoded) => {
+    if (err) return res.status(500).json({ auth: false, message: 'Failed to authenticate token.' });
 
-        // Create Connection from the Pool
-        const connection = await pool.getConnection();
+    req.userId = decoded.id;
+    next();
+  });
+};
 
-        try {
-            await connection.beginTransaction();
+// Login API to generate JWT token
+const bcrypt = require('bcrypt');
 
-            // Create Address
-            const [addressResult] = await connection.query('INSERT INTO address SET ?', [address]);
-            const addressId = addressResult.insertId;
+// ...
 
-            // Create Companies
-            const companyIds = await Promise.all(companies.map(async company => {
-                const [companyResult] = await connection.query('INSERT INTO company SET ?', [company]);
-                return companyResult.insertId;
-            }));
+// Login API to generate JWT token
+app.post('/api/login', async (req, res) => {
+  const { username, password } = req.body;
 
-            // Create User
-            const [userResult] = await connection.query('INSERT INTO user SET ?', {
-                name,
-                phone,
-                email,
-                cpf,
-                username,
-                password_hash,
-            });
-            const userId = userResult.insertId;
+  try {
+    // Replace with your actual authentication logic
+    const [user] = await pool.query('SELECT * FROM user WHERE username = ?', [username]);
 
-            // Update Address and Companies with User ID
-            await connection.query('UPDATE address SET user_id = ? WHERE address_id = ?', [userId, addressId]);
-            await Promise.all(companyIds.map(companyId =>
-                connection.query('UPDATE company SET user_id = ? WHERE company_id = ?', [userId, companyId])
-            ));
+    if (user.length > 0) {
+      const isPasswordValid = await bcrypt.compare(password, user[0].password_hash);
 
-            await connection.commit();
+      if (isPasswordValid) {
+        const token = jwt.sign({ id: user[0].user_id }, 'zxSA8Df5dQ3WE15&&', {
+          expiresIn: 86400 // expires in 24 hours
+        });
 
-            res.status(201).json({ userId, addressId, companyIds });
-        } catch (error) {
-            await connection.rollback();
-            throw error;
-        } finally {
-            connection.release();
-        }
-    } catch (error) {
-        console.error(error);
-        res.status(500).json({ error: 'Internal Server Error' });
+        res.status(200).json({ auth: true, token: token });
+      } else {
+        res.status(401).json({ auth: false, message: 'Invalid credentials.' });
+      }
+    } else {
+      res.status(401).json({ auth: false, message: 'Invalid credentials.' });
     }
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
 });
 
 
-// Update User
-app.put('/api/users/:userId', async (req, res) => {
-    const connection = await pool.getConnection();
+// Insert Member API
+app.post('/api/members', async (req, res) => {
+  try {
+    const { name, phone, email, cpf, address, companies } = req.body;
 
-    try {
-        await connection.beginTransaction();
+    const [result] = await pool.query('INSERT INTO member (name, phone, email, cpf) VALUES (?, ?, ?, ?)', [name, phone, email, cpf]);
+    const memberId = result.insertId;
 
-        const userId = req.params.userId;
-        const { name, phone, email, cpf, address, companiesToAdd, companiesToRemove } = req.body;
-
-        const cpfCheck = await connection.query('SELECT user_id FROM user WHERE cpf = ? AND user_id <> ?', [cpf, userId]);
-        console.log("cpf:" + cpf)
-        if (cpfCheck.userId != null) {
-            await connection.rollback();
-            return res.status(400).json({ error: 'CPF already in use' });
-        }
-
-        // Update User
-        await connection.query('UPDATE user SET name = ?, phone = ?, email = ?, cpf = ? WHERE user_id = ?', [name, phone, email, cpf, userId]);
-
-        // Update Address
-        if (address) {
-            await connection.query('UPDATE address SET street = ?, number = ?, cep = ?, additional_info = ? WHERE user_id = ?', [address.street, address.number, address.cep, address.additional_info, userId]);
-        }
-
-        // Add Companies
-        if (companiesToAdd) {
-            for (const company of companiesToAdd) {
-                const cnpjCheck = await connection.query('SELECT company_id FROM company WHERE cnpj = ? AND user_id <> ?', [company.cnpj, userId]);
-                if (cnpjCheck.company_id != null) {
-                    await connection.rollback();
-                    return res.status(400).json({ error: 'CNPJ already in use' });
-                } else {
-                    // Adicionar nova empresa
-                    await connection.query('INSERT INTO company (user_id, name, cnpj, industry, employees_count, revenue) VALUES (?, ?, ?, ?, ?, ?)',
-                        [userId, company.name, company.cnpj, company.industry, company.employees_count, company.revenue]);
-                }
-            }
-        }
-
-        // Remove Companies
-        if (companiesToRemove && companiesToRemove.length > 0) {
-            for (const companyId of companiesToRemove) {
-                await connection.query('DELETE FROM company WHERE company_id = ? AND user_id = ?', [companyId, userId]);
-            }
-        }
-
-        await connection.commit();
-
-        res.status(200).json({ message: 'User updated successfully' });
-    } catch (error) {
-        await connection.rollback();
-        console.error(error);
-        res.status(500).json({ error: 'Internal Server Error' });
-    } finally {
-        connection.release();
+    if (address) {
+      await pool.query('INSERT INTO address (member_id, street, number, cep, additional_info) VALUES (?, ?, ?, ?, ?)',
+        [memberId, address.street, address.number, address.cep, address.additional_info]);
     }
+
+    if (companies && companies.length > 0) {
+      for (const company of companies) {
+        await pool.query('INSERT INTO company (member_id, name, cnpj, industry, employees_count, revenue) VALUES (?, ?, ?, ?, ?, ?)',
+          [memberId, company.name, company.cnpj, company.industry, company.employees_count, company.revenue]);
+      }
+    }
+
+    res.status(201).json({ memberId });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
 });
 
+// exemplo de requisição:
+
+// # Definindo os dados do novo membro
+// $body = @{
+//   name = "Novo Membro"
+//   phone = "987654321"
+//   email = "novo.membro@example.com"
+//   cpf = "123.456.789-00"
+//   address = @{
+//     street = "123 New Street"
+//     number = 456
+//     cep = "54321-098"
+//     additional_info = "Apt 789"
+//   }
+//   companies = @(
+//     @{
+//       name = "Empresa 1"
+//       cnpj = "11.222.333/0001-44"
+//       industry = "Indústria 1"
+//       employees_count = 50
+//       revenue = 500000.00
+//     },
+//     @{
+//       name = "Empresa 2"
+//       cnpj = "22.333.444/0001-55"
+//       industry = "Indústria 2"
+//       employees_count = 75
+//       revenue = 750000.00
+//     },
+//     @{
+//       name = "Empresa 3"
+//       cnpj = "33.444.555/0001-66"
+//       industry = "Indústria 3"
+//       employees_count = 100
+//       revenue = 1000000.00
+//     },
+//     @{
+//       name = "Empresa 4"
+//       cnpj = "44.555.666/0001-77"
+//       industry = "Indústria 4"
+//       employees_count = 125
+//       revenue = 1250000.00
+//     },
+//     @{
+//       name = "Empresa 5"
+//       cnpj = "55.666.777/0001-88"
+//       industry = "Indústria 5"
+//       employees_count = 150
+//       revenue = 1500000.00
+//     }
+//   )
+// }
+
+// # Fazendo a requisição HTTP para adicionar o membro
+// Invoke-RestMethod -Uri "http://localhost:3000/api/members" -Method Post -Body ($body | ConvertTo-Json) -ContentType "application/json"
+
+// Update Member API
+app.put('/api/members/:memberId',verifyToken, async (req, res) => {
+  try {
+    const memberId = req.params.memberId;
+    const { name, phone, email, cpf, address, companies } = req.body;
+
+    await pool.query('UPDATE member SET name = ?, phone = ?, email = ?, cpf = ? WHERE member_id = ?', [name, phone, email, cpf, memberId]);
+
+    if (address) {
+      await pool.query('UPDATE address SET street = ?, number = ?, cep = ?, additional_info = ? WHERE member_id = ?',
+        [address.street, address.number, address.cep, address.additional_info, memberId]);
+    }
+
+    // Delete existing companies for the member
+    await pool.query('DELETE FROM company WHERE member_id = ?', [memberId]);
+
+    // Insert updated companies
+    if (companies && companies.length > 0) {
+      for (const company of companies) {
+        await pool.query('INSERT INTO company (member_id, name, cnpj, industry, employees_count, revenue) VALUES (?, ?, ?, ?, ?, ?)',
+          [memberId, company.name, company.cnpj, company.industry, company.employees_count, company.revenue]);
+      }
+    }
+
+    res.status(200).json({ message: 'Member updated successfully' });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
+});
+
+// Delete Member API
+app.delete('/api/members/:memberId', verifyToken, async (req, res) => {
+  try {
+    const memberId = req.params.memberId;
+
+    // Delete member's address
+    await pool.query('DELETE FROM address WHERE member_id = ?', [memberId]);
+
+    // Delete member's companies
+    await pool.query('DELETE FROM company WHERE member_id = ?', [memberId]);
+
+    // Delete member
+    await pool.query('DELETE FROM member WHERE member_id = ?', [memberId]);
+
+    res.status(200).json({ message: 'Member deleted successfully' });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
+});
+
+// List Members API
+app.get('/api/members', async (req, res) => {
+  try {
+    const [members] = await pool.query('SELECT * FROM member');
+    res.status(200).json({ members });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
+});
+
+// exemplo de requisição
+
+// Invoke-RestMethod -Uri "http://localhost:3000/api/members" -Method Get
 
 
+// Member Details API
+app.get('/api/members/:memberId', async (req, res) => {
+  try {
+    const memberId = req.params.memberId;
+
+    const [member] = await pool.query('SELECT * FROM member WHERE member_id = ?', [memberId]);
+    const [address] = await pool.query('SELECT * FROM address WHERE member_id = ?', [memberId]);
+    const [companies] = await pool.query('SELECT * FROM company WHERE member_id = ?', [memberId]);
+
+    res.status(200).json({ member, address, companies });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
+});
+
+// exemplo de requisição
+
+// Invoke-RestMethod -Uri "http://localhost:3000/api/members/1" -Method Get
 
 
-// Start Server
 app.listen(PORT, () => {
-    console.log(`Server is running on http://localhost:${PORT}`);
+  console.log(`Server is running on http://localhost:${PORT}`);
 });
-
-
-// request
