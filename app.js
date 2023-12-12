@@ -1,39 +1,50 @@
 const express = require('express');
 const bodyParser = require('body-parser');
 const jwt = require('jsonwebtoken');
+const bcrypt = require('bcrypt');
 const mysql = require('mysql2/promise');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Replace with your database connection details
-const pool = mysql.createPool({
+const config = {
+  jwtSecret: 'zxSA8Df5dQ3WE15&&',
+  dbConfig: {
     host: '127.0.0.1',
     user: 'root',
     password: 'root',
     database: 'counselor',
     waitForConnections: true,
-});
+  },
+};
+
+// Pool de Conexão MySQL
+const pool = mysql.createPool(config.dbConfig);
 
 app.use(bodyParser.json());
 
-// Middleware to verify JWT token
+// Middleware para verificar o token JWT
 const verifyToken = (req, res, next) => {
-  const token = req.headers['authorization'];
-  if (!token) return res.status(403).json({ auth: false, message: 'No token provided.' });
+  const token = req.header('Authorization');
 
-  jwt.verify(token, 'zxSA8Df5dQ3WE15&&', (err, decoded) => {
-    if (err) return res.status(500).json({ auth: false, message: 'Failed to authenticate token.' });
+  if (!token) {
+    return res.status(401).json({ error: 'Token not provided' });
+  }
 
-    req.userId = decoded.id;
+  const tokenWithoutBearer = token.replace('Bearer ', '');
+
+  jwt.verify(tokenWithoutBearer, config.jwtSecret, (err, user) => {
+    if (err) {
+      console.error('Error verifying token:', err.message);
+      return res.status(403).json({ error: 'Token verification failed' });
+    }
+
+    req.user = user;
     next();
   });
 };
 
-// Login API to generate JWT token
-const bcrypt = require('bcrypt');
 
-// ...
 
 // Login API to generate JWT token
 app.post('/api/login', async (req, res) => {
@@ -63,6 +74,21 @@ app.post('/api/login', async (req, res) => {
     res.status(500).json({ error: 'Internal Server Error' });
   }
 });
+
+// exemplo
+
+// # Dados de login
+// $loginData = @{
+//     username = "filipe.masini"
+//     password = "filipe"
+// }
+
+// # Fazendo a requisição de login
+// $response = Invoke-RestMethod -Uri "http://localhost:3000/api/login" -Method Post -Body ($loginData | ConvertTo-Json) -ContentType "application/json"
+
+// # Exibindo a resposta
+// $response
+
 
 
 // Insert Member API
@@ -179,6 +205,38 @@ app.put('/api/members/:memberId',verifyToken, async (req, res) => {
   }
 });
 
+// exemplo
+
+// # Token JWT
+// $token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwiaWF0IjoxNzAyMzQ4NTM0LCJleHAiOjE3MDI0MzQ5MzR9.XGL_iWOvU_0Sx8W2QL_w4Em5VeBcIu_xRX-R3kl1u3Y"
+
+// # Dados para a atualização
+// $updateData = @{
+//     name = "Novo Nome"
+//     phone = "987654321"
+//     email = "novo.email@example.com"
+//     cpf = "987.654.321-09"
+//     address = @{
+//         street = "456 Nova Rua"
+//         number = 789
+//         cep = "54321-098"
+//         additional_info = "Apto 987"
+//     }
+//     companies = @(
+//         @{
+//             name = "Nova Empresa"
+//             cnpj = "11.222.333/0001-44"
+//             industry = "Nova Indústria"
+//             employees_count = 50
+//             revenue = 500000.00
+//         }
+//     )
+// }
+
+// # Fazendo a requisição de atualização com token
+// Invoke-RestMethod -Uri "http://localhost:3000/api/members/1" -Method Put -Headers @{ "Authorization" = "Bearer $token" } -Body ($updateData | ConvertTo-Json) -ContentType "application/json"
+
+
 // Delete Member API
 app.delete('/api/members/:memberId', verifyToken, async (req, res) => {
   try {
@@ -199,6 +257,11 @@ app.delete('/api/members/:memberId', verifyToken, async (req, res) => {
     res.status(500).json({ error: 'Internal Server Error' });
   }
 });
+
+// exemplo
+
+// Invoke-RestMethod -Uri "http://localhost:3000/api/members/1" -Method Delete -Headers @{ "Authorization" = "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwiaWF0IjoxNzAyMzQ4NTM0LCJleHAiOjE3MDI0MzQ5MzR9.XGL_iWOvU_0Sx8W2QL_w4Em5VeBcIu_xRX-R3kl1u3Y" } -ContentType "application/json"
+
 
 // List Members API
 app.get('/api/members', async (req, res) => {
